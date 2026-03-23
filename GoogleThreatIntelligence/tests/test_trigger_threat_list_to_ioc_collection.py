@@ -995,8 +995,8 @@ class TestGoogleThreatIntelligenceThreatListToIOCCollectionTrigger:
         ip_payload = payloads["ipv4-addr.value"]
         assert ip_payload["indicators"] == "1.2.3.4"
 
-        # File → file.hashes.'SHA-256'
-        file_payload = payloads["file.hashes.'SHA-256'"]
+        # File → file.hashes.
+        file_payload = payloads["file.hashes."]
         assert file_payload["indicators"] == "abc123"
 
         # Uses /indicators/text endpoint
@@ -1009,7 +1009,7 @@ class TestGoogleThreatIntelligenceThreatListToIOCCollectionTrigger:
             GoogleThreatIntelligenceThreatListToIOCCollectionTrigger as Trigger,
         )
 
-        assert Trigger._get_stix_type({"value": "x", "type": "file"}) == "file.hashes.'SHA-256'"
+        assert Trigger._get_stix_type({"value": "x", "type": "file"}) == "file.hashes."
         assert Trigger._get_stix_type({"value": "x", "type": "url"}) == "url.value"
         assert Trigger._get_stix_type({"value": "x", "type": "ip_address"}) == "ipv4-addr.value"
         assert Trigger._get_stix_type({"value": "x", "type": "domain"}) == "domain-name.value"
