@@ -50,7 +50,7 @@ VALID_HAS_VALUES = ["malware_families", "campaigns", "reports", "threat_actors"]
 
 # VT IoC type → STIX observable type for Sekoia IOC Collection
 VT_TYPE_TO_STIX = {
-    "file": "file.hashes.'SHA-256'",
+    "file": "file.hashes",
     "url": "url.value",
     "ip_address": "ipv4-addr.value",
     "domain": "domain-name.value",
@@ -529,13 +529,14 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
     @staticmethod
     def _get_stix_type(ioc: dict[str, Any]) -> str:
         """Return the STIX observable type for a transformed IoC."""
-        return VT_TYPE_TO_STIX.get(ioc.get("type", ""), "file.hashes.'SHA-256'")
+        return VT_TYPE_TO_STIX.get(ioc.get("type", ""), "file.hashes")
 
     def push_to_sekoia(self, iocs: list[dict[str, Any]]) -> None:
         """
-        Push batch of IOCs to Sekoia IOC Collection using the enriched
-        ``/indicators`` endpoint so that per-indicator metadata
-        (``valid_from``) is preserved.
+        Push IOCs to Sekoia IOC Collection using the ``/indicators/text``
+        endpoint (proven format used by the Sekoia.io module).
+
+        IOCs are grouped by STIX type then sent as newline-separated values.
 
         Args:
             iocs: List of transformed IoC dicts (output of transform_ioc)
@@ -562,7 +563,7 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
             )
             return
 
-        # Group IOCs by STIX type so each request has a single default_fields.type
+        # Group IOCs by STIX type so each request has a single format
         iocs_by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for ioc in iocs:
             stix_type = self._get_stix_type(ioc)
@@ -579,21 +580,19 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
         sekoia_session.verify = False
         sekoia_session.trust_env = False
 
-        batch_size = 1000
-        global_batch_num = 0
+        batch_size = 500
 
         for stix_type, typed_iocs in iocs_by_type.items():
             total_batches = (len(typed_iocs) + batch_size - 1) // batch_size
 
             for batch_num, i in enumerate(range(0, len(typed_iocs), batch_size), 1):
-                global_batch_num += 1
                 batch = typed_iocs[i : i + batch_size]
-                indicators = [self._build_indicator(ioc) for ioc in batch]
+                # Newline-separated indicator values
+                indicators_text = "\n".join(ioc["value"] for ioc in batch)
 
-                # Enriched endpoint (not /indicators/text)
                 url = (
                     f"{self.ioc_collection_server}/v2/inthreat/ioc-collections/"
-                    f"{self.ioc_collection_uuid}/indicators"
+                    f"{self.ioc_collection_uuid}/indicators/text"
                 )
 
                 headers = {
@@ -601,10 +600,16 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
                     "Authorization": f"Bearer {self.sekoia_api_key}",
                 }
 
-                payload = {
-                    "default_fields": {"type": stix_type},
-                    "indicators": indicators,
+                payload: dict[str, Any] = {
+                    "format": stix_type,
+                    "indicators": indicators_text,
                 }
+
+                self.log(
+                    message=f"DEBUG push payload: format={stix_type!r}, "
+                    f"indicators_count={len(batch)}, url={url}",
+                    level="info",
+                )
 
                 # Send request with retry logic
                 retry_count = 0
