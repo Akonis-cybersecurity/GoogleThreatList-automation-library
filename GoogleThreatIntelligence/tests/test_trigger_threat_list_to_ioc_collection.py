@@ -960,13 +960,13 @@ class TestGoogleThreatIntelligenceThreatListToIOCCollectionTrigger:
         assert any("Failed to push batch" in str(call) for call in trigger.log.call_args_list)
 
     def test_push_to_sekoia_sends_enriched_payload(self, trigger):
-        """Test push_to_sekoia builds indicators with STIX types and valid_from."""
+        """Test push_to_sekoia builds indicators grouped by STIX type with default_fields."""
         trigger.module.configuration["sekoia_api_key"] = "sek-key"
         trigger.configuration["ioc_collection_uuid"] = "uuid-1"
 
         ok_response = Mock()
         ok_response.status_code = 200
-        ok_response.json.return_value = {"created": 2, "updated": 0, "ignored": 0}
+        ok_response.json.return_value = {"created": 1, "updated": 0, "ignored": 0}
 
         mock_session = Mock()
         mock_session.post.return_value = ok_response
@@ -982,35 +982,49 @@ class TestGoogleThreatIntelligenceThreatListToIOCCollectionTrigger:
         ):
             trigger.push_to_sekoia(iocs)
 
-        # Verify the JSON payload sent
-        call_args = mock_session.post.call_args
-        payload = call_args[1]["json"]
-        assert len(payload["indicators"]) == 2
+        # Two different types → two POST calls
+        assert mock_session.post.call_count == 2
 
-        # IP → ipv4-addr.value with valid_from
-        assert payload["indicators"][0]["type"] == "ipv4-addr.value"
-        assert payload["indicators"][0]["value"] == "1.2.3.4"
-        assert payload["indicators"][0]["valid_from"] == "2024-01-15T00:00:00Z"
+        # Collect payloads by type
+        payloads = {}
+        for call in mock_session.post.call_args_list:
+            p = call[1]["json"]
+            payloads[p["default_fields"]["type"]] = p
+
+        # IP → ipv4-addr.value with valid_from, type in default_fields not per-indicator
+        ip_payload = payloads["ipv4-addr.value"]
+        assert len(ip_payload["indicators"]) == 1
+        assert ip_payload["indicators"][0]["value"] == "1.2.3.4"
+        assert ip_payload["indicators"][0]["valid_from"] == "2024-01-15T00:00:00Z"
+        assert "type" not in ip_payload["indicators"][0]
 
         # File → file.hashes.'SHA-256', no valid_from when None
-        assert payload["indicators"][1]["type"] == "file.hashes.'SHA-256'"
-        assert "valid_from" not in payload["indicators"][1]
+        file_payload = payloads["file.hashes.'SHA-256'"]
+        assert len(file_payload["indicators"]) == 1
+        assert file_payload["indicators"][0]["value"] == "abc123"
+        assert "valid_from" not in file_payload["indicators"][0]
+        assert "type" not in file_payload["indicators"][0]
 
         # Enriched endpoint (not /indicators/text)
-        url = call_args[0][0]
+        url = mock_session.post.call_args_list[0][0][0]
         assert url.endswith("/indicators")
         assert "/indicators/text" not in url
 
     def test_push_to_sekoia_stix_type_mapping(self, trigger):
-        """Test all VT types map to correct STIX types."""
+        """Test all VT types map to correct STIX types via _get_stix_type."""
         from googlethreatintelligence.triggers.threat_list_to_ioc_collection import (
             GoogleThreatIntelligenceThreatListToIOCCollectionTrigger as Trigger,
         )
 
-        assert Trigger._build_indicator({"value": "x", "type": "file"})["type"] == "file.hashes.'SHA-256'"
-        assert Trigger._build_indicator({"value": "x", "type": "url"})["type"] == "url.value"
-        assert Trigger._build_indicator({"value": "x", "type": "ip_address"})["type"] == "ipv4-addr.value"
-        assert Trigger._build_indicator({"value": "x", "type": "domain"})["type"] == "domain-name.value"
+        assert Trigger._get_stix_type({"value": "x", "type": "file"}) == "file.hashes.'SHA-256'"
+        assert Trigger._get_stix_type({"value": "x", "type": "url"}) == "url.value"
+        assert Trigger._get_stix_type({"value": "x", "type": "ip_address"}) == "ipv4-addr.value"
+        assert Trigger._get_stix_type({"value": "x", "type": "domain"}) == "domain-name.value"
+
+        # _build_indicator should NOT include type (it goes in default_fields)
+        indicator = Trigger._build_indicator({"value": "x", "type": "file"})
+        assert "type" not in indicator
+        assert indicator["value"] == "x"
 
     def test_transform_ioc_extracts_valid_from(self, trigger):
         """Test transform_ioc converts first_submission_date to valid_from ISO 8601."""

@@ -8,6 +8,7 @@ and forwards them to a SEKOIA.IO IOC Collection.
 import hashlib
 import re
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from traceback import format_exc
 from typing import Any
@@ -513,17 +514,22 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
     def _build_indicator(ioc: dict[str, Any]) -> dict[str, Any]:
         """Build a Sekoia indicator object from a transformed IoC.
 
-        Maps VT type to STIX observable type and includes ``valid_from``
-        when ``first_submission_date`` was available in the VT response.
+        Returns a dict with ``value`` and optionally ``valid_from``.
+        The STIX ``type`` is **not** included here because the Sekoia
+        ``/indicators`` endpoint expects it in ``default_fields``, not
+        per-indicator.
         """
-        stix_type = VT_TYPE_TO_STIX.get(ioc.get("type", ""), "file.hashes.'SHA-256'")
         indicator: dict[str, Any] = {
             "value": ioc["value"],
-            "type": stix_type,
         }
         if ioc.get("valid_from"):
             indicator["valid_from"] = ioc["valid_from"]
         return indicator
+
+    @staticmethod
+    def _get_stix_type(ioc: dict[str, Any]) -> str:
+        """Return the STIX observable type for a transformed IoC."""
+        return VT_TYPE_TO_STIX.get(ioc.get("type", ""), "file.hashes.'SHA-256'")
 
     def push_to_sekoia(self, iocs: list[dict[str, Any]]) -> None:
         """
@@ -556,12 +562,15 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
             )
             return
 
-        # Batch into chunks of 1000
-        batch_size = 1000
-        total_batches = (len(iocs) + batch_size - 1) // batch_size
+        # Group IOCs by STIX type so each request has a single default_fields.type
+        iocs_by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for ioc in iocs:
+            stix_type = self._get_stix_type(ioc)
+            iocs_by_type[stix_type].append(ioc)
 
+        total_iocs = len(iocs)
         self.log(
-            message=f"Pushing {len(iocs)} IOCs in {total_batches} batch(es)",
+            message=f"Pushing {total_iocs} IOCs across {len(iocs_by_type)} type(s)",
             level="info",
         )
 
@@ -570,115 +579,126 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
         sekoia_session.verify = False
         sekoia_session.trust_env = False
 
-        for batch_num, i in enumerate(range(0, len(iocs), batch_size), 1):
-            batch = iocs[i : i + batch_size]
-            indicators = [self._build_indicator(ioc) for ioc in batch]
+        batch_size = 1000
+        global_batch_num = 0
 
-            # Enriched endpoint (not /indicators/text)
-            url = (
-                f"{self.ioc_collection_server}/v2/inthreat/ioc-collections/"
-                f"{self.ioc_collection_uuid}/indicators"
-            )
+        for stix_type, typed_iocs in iocs_by_type.items():
+            total_batches = (len(typed_iocs) + batch_size - 1) // batch_size
 
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.sekoia_api_key}",
-            }
+            for batch_num, i in enumerate(range(0, len(typed_iocs), batch_size), 1):
+                global_batch_num += 1
+                batch = typed_iocs[i : i + batch_size]
+                indicators = [self._build_indicator(ioc) for ioc in batch]
 
-            payload = {"indicators": indicators}
+                # Enriched endpoint (not /indicators/text)
+                url = (
+                    f"{self.ioc_collection_server}/v2/inthreat/ioc-collections/"
+                    f"{self.ioc_collection_uuid}/indicators"
+                )
 
-            # Send request with retry logic
-            retry_count = 0
-            max_retries = 3
-            success = False
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.sekoia_api_key}",
+                }
 
-            while retry_count < max_retries and not success:
-                try:
-                    response = sekoia_session.post(
-                        url, json=payload, headers=headers, timeout=30
-                    )
+                payload = {
+                    "default_fields": {"type": stix_type},
+                    "indicators": indicators,
+                }
 
-                    if 200 <= response.status_code < 300:
-                        result = response.json()
-                        self.log(
-                            message=f"Batch {batch_num}/{total_batches} pushed successfully: "
-                            f"{result.get('created', 0)} created, "
-                            f"{result.get('updated', 0)} updated, "
-                            f"{result.get('ignored', 0)} ignored",
-                            level="info",
+                # Send request with retry logic
+                retry_count = 0
+                max_retries = 3
+                success = False
+
+                while retry_count < max_retries and not success:
+                    try:
+                        response = sekoia_session.post(
+                            url, json=payload, headers=headers, timeout=30
                         )
-                        success = True
-                        break
-                    elif response.status_code == 429:
-                        # Rate limit - exponential backoff
-                        retry_after = response.headers.get("Retry-After", None)
-                        if retry_after:
-                            wait_time = int(retry_after)
+
+                        if 200 <= response.status_code < 300:
+                            result = response.json()
+                            self.log(
+                                message=f"Batch {batch_num}/{total_batches} ({stix_type}) pushed successfully: "
+                                f"{result.get('created', 0)} created, "
+                                f"{result.get('updated', 0)} updated, "
+                                f"{result.get('ignored', 0)} ignored",
+                                level="info",
+                            )
+                            success = True
+                            break
+                        elif response.status_code == 429:
+                            # Rate limit - exponential backoff
+                            retry_after = response.headers.get("Retry-After", None)
+                            if retry_after:
+                                wait_time = int(retry_after)
+                            else:
+                                wait_time = 2**retry_count * 10
+
+                            self.log(
+                                message=f"Rate limited. Waiting {wait_time} seconds...",
+                                level="info",
+                            )
+                            time.sleep(wait_time)
+                            retry_count += 1
+                        elif response.status_code in [401, 403]:
+                            # Authentication/Authorization errors - fatal
+                            self.log(
+                                message=f"Authentication error: {response.status_code} - {response.text}",
+                                level="error",
+                            )
+                            raise InvalidAPIKeyError(
+                                f"Sekoia API authentication error: {response.status_code}"
+                            )
+                        elif response.status_code == 404:
+                            # Not found - fatal
+                            self.log(
+                                message=f"IOC Collection not found: {response.status_code} - {response.text}",
+                                level="error",
+                            )
+                            raise VirusTotalAPIError(
+                                f"IOC Collection not found: {self.ioc_collection_uuid}"
+                            )
+                        elif 400 <= response.status_code < 500:
+                            # Other client errors (non-retriable) - fatal
+                            self.log(
+                                message=f"Client error when pushing IOCs: {response.status_code} - {response.text}",
+                                level="error",
+                            )
+                            raise VirusTotalAPIError(
+                                f"Sekoia API client error: {response.status_code}"
+                            )
                         else:
-                            wait_time = 2**retry_count * 10
+                            # Server errors (5xx) - temporary, retry
+                            self.log(
+                                message=f"Server error {response.status_code}: {response.text}",
+                                level="error",
+                            )
+                            retry_count += 1
+                            time.sleep(5)
 
+                    except requests.exceptions.Timeout:
                         self.log(
-                            message=f"Rate limited. Waiting {wait_time} seconds...",
-                            level="info",
+                            message="Request timeout",
+                            level="error",
                         )
-                        time.sleep(wait_time)
                         retry_count += 1
-                    elif response.status_code in [401, 403]:
-                        # Authentication/Authorization errors - fatal
+                        time.sleep(5)
+                    except requests.exceptions.RequestException as error:
                         self.log(
-                            message=f"Authentication error: {response.status_code} - {response.text}",
-                            level="error",
-                        )
-                        raise InvalidAPIKeyError(
-                            f"Sekoia API authentication error: {response.status_code}"
-                        )
-                    elif response.status_code == 404:
-                        # Not found - fatal
-                        self.log(
-                            message=f"IOC Collection not found: {response.status_code} - {response.text}",
-                            level="error",
-                        )
-                        raise VirusTotalAPIError(
-                            f"IOC Collection not found: {self.ioc_collection_uuid}"
-                        )
-                    elif 400 <= response.status_code < 500:
-                        # Other client errors (non-retriable) - fatal
-                        self.log(
-                            message=f"Client error when pushing IOCs: {response.status_code} - {response.text}",
-                            level="error",
-                        )
-                        raise VirusTotalAPIError(
-                            f"Sekoia API client error: {response.status_code}"
-                        )
-                    else:
-                        # Server errors (5xx) - temporary, retry
-                        self.log(
-                            message=f"Server error {response.status_code}: {response.text}",
+                            message=f"Request error: {error}",
                             level="error",
                         )
                         retry_count += 1
                         time.sleep(5)
 
-                except requests.exceptions.Timeout:
+                if not success:
                     self.log(
-                        message="Request timeout",
+                        message=f"Failed to push batch {batch_num}/{total_batches} ({stix_type}) "
+                        f"after {max_retries} retries",
                         level="error",
                     )
-                    retry_count += 1
-                    time.sleep(5)
-                except requests.exceptions.RequestException as error:
-                    self.log(
-                        message=f"Request error: {error}",
-                        level="error",
-                    )
-                    retry_count += 1
-                    time.sleep(5)
-
-            if not success:
-                self.log(
-                    message=f"Failed to push batch {batch_num}/{total_batches} after {max_retries} retries",
-                    level="error",
-                )
     
     def _get_context_store(self) -> dict:
         """
