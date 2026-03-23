@@ -989,7 +989,7 @@ class TestGoogleThreatIntelligenceThreatListToIOCCollectionTrigger:
         payloads = {}
         for call in mock_session.post.call_args_list:
             p = call[1]["json"]
-            payloads[p["default_fields"]["type"]] = p
+            payloads[p["default_fields"]["format"]] = p
 
         # IP → ipv4-addr.value with valid_from, type in default_fields not per-indicator
         ip_payload = payloads["ipv4-addr.value"]

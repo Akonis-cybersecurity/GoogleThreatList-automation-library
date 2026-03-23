@@ -579,7 +579,7 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
         sekoia_session.verify = False
         sekoia_session.trust_env = False
 
-        batch_size = 1000
+        batch_size = 100
         global_batch_num = 0
 
         for stix_type, typed_iocs in iocs_by_type.items():
@@ -602,7 +602,7 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
                 }
 
                 payload = {
-                    "default_fields": {"type": stix_type},
+                    "default_fields": {"format": stix_type},
                     "indicators": indicators,
                 }
 
