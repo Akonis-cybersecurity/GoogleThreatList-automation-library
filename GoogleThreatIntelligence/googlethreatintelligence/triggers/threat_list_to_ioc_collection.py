@@ -605,6 +605,12 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
                     "indicators": indicators_text,
                 }
 
+                self.log(
+                    message=f"DEBUG push payload: format={stix_type!r}, "
+                    f"indicators_count={len(batch)}, url={url}",
+                    level="info",
+                )
+
                 # Send request with retry logic
                 retry_count = 0
                 max_retries = 3
