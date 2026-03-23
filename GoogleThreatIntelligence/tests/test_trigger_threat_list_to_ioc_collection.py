@@ -959,8 +959,8 @@ class TestGoogleThreatIntelligenceThreatListToIOCCollectionTrigger:
 
         assert any("Failed to push batch" in str(call) for call in trigger.log.call_args_list)
 
-    def test_push_to_sekoia_sends_enriched_payload(self, trigger):
-        """Test push_to_sekoia builds indicators grouped by STIX type with default_fields."""
+    def test_push_to_sekoia_sends_text_payload(self, trigger):
+        """Test push_to_sekoia uses /indicators/text with newline-separated values grouped by STIX type."""
         trigger.module.configuration["sekoia_api_key"] = "sek-key"
         trigger.configuration["ioc_collection_uuid"] = "uuid-1"
 
@@ -985,30 +985,23 @@ class TestGoogleThreatIntelligenceThreatListToIOCCollectionTrigger:
         # Two different types → two POST calls
         assert mock_session.post.call_count == 2
 
-        # Collect payloads by type
+        # Collect payloads by format
         payloads = {}
         for call in mock_session.post.call_args_list:
             p = call[1]["json"]
-            payloads[p["default_fields"]["format"]] = p
+            payloads[p["format"]] = p
 
-        # IP → ipv4-addr.value with valid_from, type in default_fields not per-indicator
+        # IP → ipv4-addr.value, indicators is a newline-separated string
         ip_payload = payloads["ipv4-addr.value"]
-        assert len(ip_payload["indicators"]) == 1
-        assert ip_payload["indicators"][0]["value"] == "1.2.3.4"
-        assert ip_payload["indicators"][0]["valid_from"] == "2024-01-15T00:00:00Z"
-        assert "type" not in ip_payload["indicators"][0]
+        assert ip_payload["indicators"] == "1.2.3.4"
 
-        # File → file.hashes.'SHA-256', no valid_from when None
+        # File → file.hashes.'SHA-256'
         file_payload = payloads["file.hashes.'SHA-256'"]
-        assert len(file_payload["indicators"]) == 1
-        assert file_payload["indicators"][0]["value"] == "abc123"
-        assert "valid_from" not in file_payload["indicators"][0]
-        assert "type" not in file_payload["indicators"][0]
+        assert file_payload["indicators"] == "abc123"
 
-        # Enriched endpoint (not /indicators/text)
+        # Uses /indicators/text endpoint
         url = mock_session.post.call_args_list[0][0][0]
-        assert url.endswith("/indicators")
-        assert "/indicators/text" not in url
+        assert url.endswith("/indicators/text")
 
     def test_push_to_sekoia_stix_type_mapping(self, trigger):
         """Test all VT types map to correct STIX types via _get_stix_type."""
