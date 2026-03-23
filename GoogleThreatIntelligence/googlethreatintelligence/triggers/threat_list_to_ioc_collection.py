@@ -50,7 +50,7 @@ VALID_HAS_VALUES = ["malware_families", "campaigns", "reports", "threat_actors"]
 
 # VT IoC type → STIX observable type for Sekoia IOC Collection
 VT_TYPE_TO_STIX = {
-    "file": "file.hashes.",
+    "file": "file.hashes",
     "url": "url.value",
     "ip_address": "ipv4-addr.value",
     "domain": "domain-name.value",
@@ -529,7 +529,7 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
     @staticmethod
     def _get_stix_type(ioc: dict[str, Any]) -> str:
         """Return the STIX observable type for a transformed IoC."""
-        return VT_TYPE_TO_STIX.get(ioc.get("type", ""), "file.hashes.")
+        return VT_TYPE_TO_STIX.get(ioc.get("type", ""), "file.hashes")
 
     def push_to_sekoia(self, iocs: list[dict[str, Any]]) -> None:
         """
