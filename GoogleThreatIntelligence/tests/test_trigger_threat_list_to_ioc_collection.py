@@ -866,8 +866,8 @@ class TestGoogleThreatIntelligenceThreatListToIOCCollectionTrigger:
         rate_response.text = "rate limit"
 
         ok_response = Mock()
-        ok_response.status_code = 200
-        ok_response.json.return_value = {"created": 1, "updated": 0, "ignored": 0}
+        ok_response.status_code = 202
+        ok_response.json.return_value = {"task_id": "task-uuid-123"}
         ok_response.text = ""
 
         mock_session = Mock()
@@ -959,14 +959,14 @@ class TestGoogleThreatIntelligenceThreatListToIOCCollectionTrigger:
 
         assert any("Failed to push batch" in str(call) for call in trigger.log.call_args_list)
 
-    def test_push_to_sekoia_sends_text_payload(self, trigger):
-        """Test push_to_sekoia uses /indicators/text with newline-separated values grouped by STIX type."""
+    def test_push_to_sekoia_sends_json_payload(self, trigger):
+        """Test push_to_sekoia uses /indicators JSON endpoint with per-indicator valid_from."""
         trigger.module.configuration["sekoia_api_key"] = "sek-key"
         trigger.configuration["ioc_collection_uuid"] = "uuid-1"
 
         ok_response = Mock()
-        ok_response.status_code = 200
-        ok_response.json.return_value = {"created": 1, "updated": 0, "ignored": 0}
+        ok_response.status_code = 202
+        ok_response.json.return_value = {"task_id": "task-uuid-123"}
 
         mock_session = Mock()
         mock_session.post.return_value = ok_response
@@ -985,23 +985,24 @@ class TestGoogleThreatIntelligenceThreatListToIOCCollectionTrigger:
         # Two different types → two POST calls
         assert mock_session.post.call_count == 2
 
-        # Collect payloads by format
+        # Collect payloads by STIX type from default_fields
         payloads = {}
         for call in mock_session.post.call_args_list:
             p = call[1]["json"]
-            payloads[p["format"]] = p
+            payloads[p["default_fields"]["type"]] = p
 
-        # IP → ipv4-addr.value, indicators is a newline-separated string
+        # IP → ipv4-addr.value, indicators is a list of objects with valid_from
         ip_payload = payloads["ipv4-addr.value"]
-        assert ip_payload["indicators"] == "1.2.3.4"
+        assert ip_payload["indicators"] == [{"value": "1.2.3.4", "valid_from": "2024-01-15T00:00:00Z"}]
 
-        # File → file.hashes
+        # File → file.hashes, no valid_from (None is excluded)
         file_payload = payloads["file.hashes"]
-        assert file_payload["indicators"] == "abc123"
+        assert file_payload["indicators"] == [{"value": "abc123"}]
 
-        # Uses /indicators/text endpoint
+        # Uses /indicators endpoint (not /indicators/text)
         url = mock_session.post.call_args_list[0][0][0]
-        assert url.endswith("/indicators/text")
+        assert url.endswith("/indicators")
+        assert not url.endswith("/indicators/text")
 
     def test_push_to_sekoia_stix_type_mapping(self, trigger):
         """Test all VT types map to correct STIX types via _get_stix_type."""
@@ -1120,7 +1121,7 @@ class TestGoogleThreatIntelligenceThreatListToIOCCollectionTrigger:
 
         ok_response = Mock()
         ok_response.status_code = 200
-        ok_response.json.return_value = {"created": 1, "updated": 0, "ignored": 0}
+        ok_response.json.return_value = {"task_id": "task-uuid-123"}
 
         mock_session = Mock()
         mock_session.post.side_effect = [rate_response, ok_response]
@@ -1147,7 +1148,7 @@ class TestGoogleThreatIntelligenceThreatListToIOCCollectionTrigger:
 
         ok_response = Mock()
         ok_response.status_code = 200
-        ok_response.json.return_value = {"created": 1, "updated": 0, "ignored": 0}
+        ok_response.json.return_value = {"task_id": "task-uuid-123"}
 
         mock_session = Mock()
         mock_session.post.side_effect = [rate_response, ok_response]

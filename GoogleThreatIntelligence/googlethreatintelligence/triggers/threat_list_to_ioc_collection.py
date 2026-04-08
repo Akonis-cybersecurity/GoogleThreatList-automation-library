@@ -533,10 +533,11 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
 
     def push_to_sekoia(self, iocs: list[dict[str, Any]]) -> None:
         """
-        Push IOCs to Sekoia IOC Collection using the ``/indicators/text``
-        endpoint (proven format used by the Sekoia.io module).
+        Push IOCs to Sekoia IOC Collection using the ``/indicators`` JSON
+        endpoint, which supports per-indicator ``valid_from`` metadata.
 
-        IOCs are grouped by STIX type then sent as newline-separated values.
+        IOCs are grouped by STIX type (each batch must have a single type in
+        ``default_fields``), then sent as a list of indicator objects.
 
         Args:
             iocs: List of transformed IoC dicts (output of transform_ioc)
@@ -563,7 +564,7 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
             )
             return
 
-        # Group IOCs by STIX type so each request has a single format
+        # Group IOCs by STIX type so each request has a single type in default_fields
         iocs_by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for ioc in iocs:
             stix_type = self._get_stix_type(ioc)
@@ -580,19 +581,17 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
         sekoia_session.verify = False
         sekoia_session.trust_env = False
 
-        batch_size = 500
+        batch_size = 100
 
         for stix_type, typed_iocs in iocs_by_type.items():
             total_batches = (len(typed_iocs) + batch_size - 1) // batch_size
 
             for batch_num, i in enumerate(range(0, len(typed_iocs), batch_size), 1):
                 batch = typed_iocs[i : i + batch_size]
-                # Newline-separated indicator values
-                indicators_text = "\n".join(ioc["value"] for ioc in batch)
 
                 url = (
                     f"{self.ioc_collection_server}/v2/inthreat/ioc-collections/"
-                    f"{self.ioc_collection_uuid}/indicators/text"
+                    f"{self.ioc_collection_uuid}/indicators"
                 )
 
                 headers = {
@@ -601,15 +600,9 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
                 }
 
                 payload: dict[str, Any] = {
-                    "format": stix_type,
-                    "indicators": indicators_text,
+                    "default_fields": {"type": stix_type},
+                    "indicators": [self._build_indicator(ioc) for ioc in batch],
                 }
-
-                self.log(
-                    message=f"DEBUG push payload: format={stix_type!r}, "
-                    f"indicators_count={len(batch)}, url={url}",
-                    level="info",
-                )
 
                 # Send request with retry logic
                 retry_count = 0
@@ -622,16 +615,20 @@ class GoogleThreatIntelligenceThreatListToIOCCollectionTrigger(Trigger):
                             url, json=payload, headers=headers, timeout=30
                         )
 
-                        if 200 <= response.status_code < 300:
+                        if response.status_code in (200, 202):
                             result = response.json()
+                            task_id = result.get("task_id", "unknown")
                             self.log(
-                                message=f"Batch {batch_num}/{total_batches} ({stix_type}) pushed successfully: "
-                                f"{result.get('created', 0)} created, "
-                                f"{result.get('updated', 0)} updated, "
-                                f"{result.get('ignored', 0)} ignored",
+                                message=f"Batch {batch_num}/{total_batches} ({stix_type}) accepted "
+                                f"({len(batch)} IOCs with valid_from metadata, task_id={task_id}). "
+                                "Final counts (created/updated/ignored) are reported "
+                                "asynchronously via bulk-import-progress events in the websocket.",
                                 level="info",
                             )
                             success = True
+                            # Brief pause between batches to avoid overwhelming the API
+                            if batch_num < total_batches:
+                                time.sleep(5)
                             break
                         elif response.status_code == 429:
                             # Rate limit - exponential backoff
